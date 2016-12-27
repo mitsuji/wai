@@ -64,6 +64,7 @@ module Network.Wai.Handler.Warp.Internal (
   , Source
   , recvRequest
   , sendResponse
+  , parseRequestLine
   ) where
 
 import Network.Wai.Handler.Warp.Buffer
@@ -73,6 +74,7 @@ import Network.Wai.Handler.Warp.FileInfoCache
 import Network.Wai.Handler.Warp.Header
 import Network.Wai.Handler.Warp.Recv
 import Network.Wai.Handler.Warp.Request
+import Network.Wai.Handler.Warp.RequestHeader
 import Network.Wai.Handler.Warp.Response
 import Network.Wai.Handler.Warp.Run
 import Network.Wai.Handler.Warp.SendFile

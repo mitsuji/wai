@@ -3,6 +3,7 @@
 
 module Network.Wai.Handler.Warp.RequestHeader (
       parseHeaderLines
+    , parseRequestLine
     ) where
 
 import Control.Exception (throwIO)

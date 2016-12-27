@@ -40,6 +40,9 @@ module Network.Wai.Handler.WarpTLS (
     , WarpTLSException (..)
     , DH.Params
     , DH.generateParams
+    -- * Proxy Runner
+    , runTLSProxy
+    , runTLSProxySocket
     ) where
 
 #if __GLASGOW_HASKELL__ < 709
@@ -64,6 +67,8 @@ import Network.Wai (Application)
 import Network.Wai.Handler.Warp
 import Network.Wai.Handler.Warp.Internal
 import System.IO.Error (isEOFError)
+
+import qualified Data.ByteString.Char8 as B
 
 ----------------------------------------------------------------
 
@@ -252,13 +257,13 @@ runTLSSocket tlsset@TLSSettings{..} set sock app = do
             key <- maybe (S.readFile keyFile) return mkey
             either error return $
               TLS.credentialLoadX509ChainFromMemory cert chainCertsMemory key
-    runTLSSocket' tlsset set credential sock app
+    runTLSSocket' False tlsset set [credential] sock app
 
-runTLSSocket' :: TLSSettings -> Settings -> TLS.Credential -> Socket -> Application -> IO ()
-runTLSSocket' tlsset@TLSSettings{..} set credential sock app =
+runTLSSocket' :: Bool -> TLSSettings -> Settings -> [TLS.Credential] -> Socket -> Application -> IO ()
+runTLSSocket' isProxy tlsset@TLSSettings{..} set credentials sock app =
     runSettingsConnectionMakerSecure set get app
   where
-    get = getter tlsset sock params
+    get = getter isProxy tlsset sock params
     params = def { -- TLS.ServerParams
         TLS.serverWantClientCert = tlsWantClientCert
       , TLS.serverCACertificates = []
@@ -273,7 +278,7 @@ runTLSSocket' tlsset@TLSSettings{..} set credential sock app =
           (if settingsHTTP2Enabled set then Just alpn else Nothing)
       }
     shared = def {
-        TLS.sharedCredentials = TLS.Credentials [credential]
+        TLS.sharedCredentials = TLS.Credentials credentials
       }
     supported = def { -- TLS.Supported
         TLS.supportedVersions       = tlsAllowedVersions
@@ -303,20 +308,32 @@ alpn xs
 
 ----------------------------------------------------------------
 
-getter :: TLS.TLSParams params => TLSSettings -> Socket -> params -> IO (IO (Connection, Transport), SockAddr)
-getter tlsset@TLSSettings{..} sock params = do
+getter :: TLS.TLSParams params => Bool -> TLSSettings -> Socket -> params -> IO (IO (Connection, Transport), SockAddr)
+getter isProxy tlsset@TLSSettings{..} sock params = do
     (s, sa) <- accept sock
-    return (mkConn tlsset s params, sa)
+    return (mkConn isProxy tlsset s params, sa)
 
-mkConn :: TLS.TLSParams params => TLSSettings -> Socket -> params -> IO (Connection, Transport)
-mkConn tlsset s params = switch `onException` sClose s
+mkConn :: TLS.TLSParams params => Bool -> TLSSettings -> Socket -> params -> IO (Connection, Transport)
+mkConn isProxy tlsset s params = switch `onException` sClose s
   where
     switch = do
         firstBS <- safeRecv s 4096
         if not (S.null firstBS) && S.head firstBS == 0x16 then
             httpOverTls tlsset s firstBS params
           else
-            plainHTTP tlsset s firstBS
+            if not isProxy then
+              plainHTTP tlsset s firstBS
+            else
+              do
+                -- [TODO] to improve parse and check logic.
+                (method, _, _, httpversion) <- parseRequestLine $ S.takeWhile (/=0x0d) firstBS
+                if (method == "CONNECT") then
+                  do
+                    sendAll s $ (B.pack $ show httpversion) `B.append` " 200 Connection established\r\n\r\n"
+                    secondBS <- safeRecv s 4096
+                    httpOverTls tlsset s secondBS params
+                  else
+                    plainHTTP tlsset s firstBS
 
 ----------------------------------------------------------------
 
@@ -485,3 +502,23 @@ recvPlain ref fallback = do
 data WarpTLSException = InsecureConnectionDenied
     deriving (Show, Typeable)
 instance Exception WarpTLSException
+
+
+----------------------------------------------------------------
+
+-- | Running 'Application' with 'TLSSettings' and 'Settings'.
+runTLSProxy :: TLSSettings -> Settings -> Application -> IO ()
+runTLSProxy tset set app = withSocketsDo $
+    bracket
+        (bindPortTCP (getPort set) (getHost set))
+        sClose
+        (\sock -> runTLSProxySocket tset set sock app)
+
+----------------------------------------------------------------
+
+-- | Running 'Application' with 'TLSSettings' and 'Settings' using
+--   specified 'Socket'.
+runTLSProxySocket :: TLSSettings -> Settings -> Socket -> Application -> IO ()
+runTLSProxySocket tlsset@TLSSettings{..} set sock app =
+    runTLSSocket' True tlsset set [] sock app
+
